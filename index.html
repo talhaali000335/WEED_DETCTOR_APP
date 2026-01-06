@@ -19,8 +19,8 @@
         .status-desc { font-size: 12px; opacity: 0.7; margin-top: 2px; }
         .frame-count { background: rgba(255,255,255,0.08); padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 500; }
         .detection-area { flex: 1; position: relative; overflow: hidden; }
-        #video { width: 100%; height: 100%; object-fit: contain; background: #000; }
-        canvas { position: absolute; inset: 0; pointer-events: none; }
+        #video { width: 100%; height: 100%; object-fit: cover; background: #000; transform: scaleX(-1); } /* Mirror for front camera */
+        canvas { position: absolute; inset: 0; pointer-events: none; transform: scaleX(-1); } /* Mirror canvas too */
         .bottom-panel-wrapper { position: absolute; bottom: 0; left: 0; right: 0; z-index: 50; transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1); }
         .bottom-panel { background: rgba(15,15,15,0.92); backdrop-filter: blur(20px); border-top-left-radius: 24px; border-top-right-radius: 24px; border-top: 1px solid rgba(255,255,255,0.08); box-shadow: 0 -8px 40px rgba(0,0,0,0.6); padding: 0 20px 20px; touch-action: pan-y; }
         .drag-handle { width: 40px; height: 4px; background: rgba(255,255,255,0.3); border-radius: 2px; margin: 12px auto; cursor: grab; }
@@ -113,8 +113,6 @@
         let totalWeeds = 0;
         let totalCrops = 0;
         let avgConf = 0;
-        let lastY = 0;
-        let dragging = false;
         let animationId = null;
 
         // Tracking IDs
@@ -123,44 +121,129 @@
         const seenObjects = new Set();
         const objectLabels = new Map();
 
+        // Enhanced camera constraints for better quality
         const constraints = {
             video: {
-                facingMode: { ideal: 'environment' },
-                width: { min: 640, ideal: 1280 },
-                height: { min: 480, ideal: 720 },
-            }
+                facingMode: { ideal: 'environment' }, // Use back camera
+                width: { min: 1280, ideal: 1920, max: 2560 },
+                height: { min: 720, ideal: 1080, max: 1440 },
+                frameRate: { ideal: 60, min: 30 },
+                aspectRatio: { ideal: 16/9 },
+                resizeMode: 'crop-and-scale',
+                advanced: [
+                    { focusMode: 'continuous' }, // Auto focus
+                    { exposureMode: 'continuous' }, // Auto exposure
+                    { whiteBalanceMode: 'continuous' } // Auto white balance
+                ]
+            },
+            audio: false
         };
+
+        // Confidence and IOU thresholds
+        const CONFIDENCE_THRESHOLD = 0.7; // Increased from 0.3 to 0.7
+        const IOU_THRESHOLD = 0.6; // Increased from 0.4 to 0.6
 
         function resizeCanvas() {
             if (video.videoWidth && video.videoHeight) {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
+                // Set canvas to fill container while maintaining aspect ratio
+                const videoAspect = video.videoWidth / video.videoHeight;
+                const containerAspect = canvas.clientWidth / canvas.clientHeight;
+                
+                if (videoAspect > containerAspect) {
+                    // Video is wider
+                    const scale = canvas.clientHeight / video.videoHeight;
+                    ctx.setTransform(-scale, 0, 0, scale, canvas.width, 0); // Mirror and scale
+                } else {
+                    // Video is taller
+                    const scale = canvas.clientWidth / video.videoWidth;
+                    ctx.setTransform(-scale, 0, 0, scale, canvas.width, 0); // Mirror and scale
+                }
             }
         }
 
         async function startCamera() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                console.log('Requesting camera with constraints:', JSON.stringify(constraints));
+                
+                // Get all available cameras
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                console.log('Available cameras:', videoDevices);
+                
+                // Try to find back camera
+                let backCameraConstraints = null;
+                for (const device of videoDevices) {
+                    if (device.label.toLowerCase().includes('back') || 
+                        device.label.toLowerCase().includes('rear')) {
+                        console.log('Found back camera:', device.label);
+                        backCameraConstraints = {
+                            ...constraints,
+                            video: {
+                                ...constraints.video,
+                                deviceId: { exact: device.deviceId }
+                            }
+                        };
+                        break;
+                    }
+                }
+
+                // Use back camera if found, else use default
+                const finalConstraints = backCameraConstraints || constraints;
+                
+                const stream = await navigator.mediaDevices.getUserMedia(finalConstraints);
                 video.srcObject = stream;
+                
+                // Get video track to adjust settings
+                const videoTrack = stream.getVideoTracks()[0];
+                console.log('Camera capabilities:', videoTrack.getCapabilities());
+                console.log('Camera settings:', videoTrack.getSettings());
+                
+                // Try to apply focus mode if supported
+                if (videoTrack.getCapabilities().focusMode) {
+                    try {
+                        await videoTrack.applyConstraints({
+                            advanced: [{ focusMode: 'continuous' }]
+                        });
+                        console.log('Continuous focus enabled');
+                    } catch (e) {
+                        console.log('Could not set continuous focus:', e);
+                    }
+                }
+
                 video.onloadedmetadata = () => {
+                    console.log('Video dimensions:', video.videoWidth, 'x', video.videoHeight);
                     video.play();
                     resizeCanvas();
-                    statusDesc.textContent = 'Camera ready';
+                    statusDesc.textContent = 'High-quality camera ready';
                     loadModel();
                 };
+                
                 video.onresize = resizeCanvas;
+                window.addEventListener('resize', resizeCanvas);
+                
             } catch (e) {
                 console.error('Camera error:', e);
-                statusDesc.textContent = 'Camera failed - using fallback';
-                // Try basic constraints
+                statusDesc.textContent = 'Camera failed - trying basic mode';
+                
+                // Try basic constraints as fallback
                 try {
-                    const fallback = { video: true };
-                    const stream = await navigator.mediaDevices.getUserMedia(fallback);
+                    const basicConstraints = {
+                        video: {
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 },
+                            facingMode: 'environment'
+                        },
+                        audio: false
+                    };
+                    
+                    const stream = await navigator.mediaDevices.getUserMedia(basicConstraints);
                     video.srcObject = stream;
                     video.play();
                     loadModel();
                 } catch (fallbackError) {
-                    statusDesc.textContent = 'Cannot access camera';
+                    statusDesc.textContent = 'Cannot access camera. Please allow camera permissions.';
                     console.error('Fallback also failed:', fallbackError);
                 }
             }
@@ -193,7 +276,7 @@
                     throw new Error('Could not load model from any path');
                 }
                 
-                statusDesc.textContent = 'Model loaded – detecting! Point at plants';
+                statusDesc.textContent = 'High-precision model loaded – detecting with 70%+ confidence';
                 detectFrame();
             } catch (e) {
                 console.error('Model load error:', e);
@@ -201,8 +284,8 @@
             }
         }
 
-        // Fixed NMS function - no const reassignment
-        function nonMaxSuppression(boxes, scores, iouThreshold = 0.4) {
+        // Fixed NMS function
+        function nonMaxSuppression(boxes, scores, iouThreshold = IOU_THRESHOLD) {
             const indices = [];
             let remaining = scores.map((s, i) => ({score: s, index: i}))
                                   .sort((a, b) => b.score - a.score);
@@ -248,26 +331,24 @@
             tf.engine().startScope();
 
             try {
+                // Capture frame with high quality
                 const img = tf.browser.fromPixels(video);
                 const resized = tf.image.resizeBilinear(img, [640, 640]);
                 const normalized = resized.div(255.0);
                 const batched = normalized.expandDims(0);
 
-                // Use model.execute() instead of executeAsync() when possible
+                // Use model.execute() for better performance
                 let prediction;
                 try {
-                    prediction = await model.executeAsync(batched);
-                } catch (asyncError) {
-                    console.log('Async execution failed, trying sync:', asyncError.message);
                     prediction = model.execute(batched);
+                } catch (executeError) {
+                    console.log('Sync execution failed, trying async:', executeError.message);
+                    prediction = await model.executeAsync(batched);
                 }
 
                 // Handle prediction output
                 let output = Array.isArray(prediction) ? prediction[0] : prediction;
                 
-                // Log for debugging
-                console.log('Output shape:', output.shape);
-
                 // Process based on shape
                 const shape = output.shape;
                 const data = await output.data();
@@ -285,7 +366,7 @@
                         const cropConf = data[42000 + i];
 
                         const conf = Math.max(weedConf, cropConf);
-                        if (conf < 0.3) continue;
+                        if (conf < CONFIDENCE_THRESHOLD) continue; // Use higher threshold
 
                         const classId = weedConf > cropConf ? 0 : 1;
                         const x = (cx - w / 2) * 640;
@@ -293,7 +374,7 @@
                         const width = w * 640;
                         const height = h * 640;
 
-                        if (width > 0 && height > 0) {
+                        if (width > 10 && height > 10) { // Minimum size filter
                             rawDetections.push({
                                 bbox: [x, y, width, height],
                                 confidence: conf,
@@ -313,7 +394,7 @@
                         const cropConf = data[offset + 5];
 
                         const conf = Math.max(weedConf, cropConf);
-                        if (conf < 0.3) continue;
+                        if (conf < CONFIDENCE_THRESHOLD) continue; // Use higher threshold
 
                         const classId = weedConf > cropConf ? 0 : 1;
                         const x = (cx - w / 2) * 640;
@@ -321,7 +402,7 @@
                         const width = w * 640;
                         const height = h * 640;
 
-                        if (width > 0 && height > 0) {
+                        if (width > 10 && height > 10) { // Minimum size filter
                             rawDetections.push({
                                 bbox: [x, y, width, height],
                                 confidence: conf,
@@ -331,7 +412,7 @@
                     }
                 }
 
-                // Clean up tensors
+                // Clean up tensors to prevent memory leaks
                 img.dispose();
                 resized.dispose();
                 normalized.dispose();
@@ -339,16 +420,16 @@
                 output.dispose();
                 if (prediction && prediction.dispose) prediction.dispose();
 
-                // Apply NMS if we have detections
+                // Apply NMS with higher IOU threshold
                 if (rawDetections.length > 0) {
                     const boxes = rawDetections.map(d => d.bbox);
                     const scores = rawDetections.map(d => d.confidence);
-                    const indices = nonMaxSuppression(boxes, scores, 0.4);
+                    const indices = nonMaxSuppression(boxes, scores, IOU_THRESHOLD);
 
                     const detections = indices.map(idx => {
                         const d = rawDetections[idx];
                         const isWeed = d.classId === 0;
-                        const objectId = `${d.classId}_${Math.round(d.bbox[0])}_${Math.round(d.bbox[1])}`;
+                        const objectId = `${d.classId}_${Math.round(d.bbox[0])}_${Math.round(d.bbox[1])}_${Math.round(d.bbox[2])}_${Math.round(d.bbox[3])}`;
 
                         let label;
                         if (!seenObjects.has(objectId)) {
@@ -384,45 +465,67 @@
                         avgConf = detections.reduce((s, d) => s + d.confidence, 0) / detections.length;
                         const confidencePercent = Math.min(100, avgConf * 100);
                         confidenceFill.style.width = `${confidencePercent}%`;
-                        confidenceLabel.textContent = `Avg Confidence: ${confidencePercent.toFixed(1)}%`;
-                        statusDesc.textContent = `Detected ${detections.length} objects`;
+                        confidenceLabel.textContent = `Avg Confidence: ${confidencePercent.toFixed(1)}% (${detections.length} objects)`;
+                        statusDesc.textContent = `High-confidence detection: ${detections.length} objects`;
                     } else {
-                        statusDesc.textContent = 'Scanning...';
+                        statusDesc.textContent = 'Scanning for plants (70%+ confidence required)';
                     }
 
-                    // Draw detections
+                    // Draw detections with better visualization
+                    ctx.save();
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     
                     detections.forEach(d => {
-                        const scaleX = canvas.width / 640;
-                        const scaleY = canvas.height / 640;
+                        const scaleX = video.videoWidth / 640;
+                        const scaleY = video.videoHeight / 640;
 
                         const sx = d.bbox[0] * scaleX;
                         const sy = d.bbox[1] * scaleY;
                         const sw = d.bbox[2] * scaleX;
                         const sh = d.bbox[3] * scaleY;
 
-                        // Draw bounding box
+                        // Draw bounding box with glow effect
                         ctx.lineWidth = 3;
                         ctx.strokeStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
+                        ctx.shadowColor = d.class === 'weed' ? '#ff4444' : '#44aa44';
+                        ctx.shadowBlur = 15;
                         ctx.strokeRect(sx, sy, sw, sh);
+                        ctx.shadowBlur = 0;
 
-                        // Draw label background
+                        // Draw label background with rounded corners
                         const labelText = `${d.label} ${(d.confidence * 100).toFixed(0)}%`;
                         ctx.font = 'bold 14px Inter';
                         const textWidth = ctx.measureText(labelText).width;
                         const labelWidth = textWidth + 20;
                         
+                        // Rounded rectangle for label
+                        const labelX = sx;
+                        const labelY = sy - 30;
+                        const radius = 6;
+                        
                         ctx.fillStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
-                        ctx.fillRect(sx, sy - 30, labelWidth, 30);
+                        ctx.beginPath();
+                        ctx.moveTo(labelX + radius, labelY);
+                        ctx.lineTo(labelX + labelWidth - radius, labelY);
+                        ctx.quadraticCurveTo(labelX + labelWidth, labelY, labelX + labelWidth, labelY + radius);
+                        ctx.lineTo(labelX + labelWidth, labelY + 30 - radius);
+                        ctx.quadraticCurveTo(labelX + labelWidth, labelY + 30, labelX + labelWidth - radius, labelY + 30);
+                        ctx.lineTo(labelX + radius, labelY + 30);
+                        ctx.quadraticCurveTo(labelX, labelY + 30, labelX, labelY + 30 - radius);
+                        ctx.lineTo(labelX, labelY + radius);
+                        ctx.quadraticCurveTo(labelX, labelY, labelX + radius, labelY);
+                        ctx.closePath();
+                        ctx.fill();
 
                         // Draw label text
                         ctx.fillStyle = 'white';
                         ctx.font = 'bold 14px Inter';
-                        ctx.fillText(labelText, sx + 10, sy - 10);
+                        ctx.fillText(labelText, labelX + 10, labelY + 20);
                     });
+                    
+                    ctx.restore();
                 } else {
-                    statusDesc.textContent = 'No plants detected – try better lighting/closer';
+                    statusDesc.textContent = 'No high-confidence detections – move closer/improve lighting';
                 }
 
             } catch (e) {
@@ -431,14 +534,18 @@
             }
 
             tf.engine().endScope();
-            animationId = requestAnimationFrame(detectFrame);
+            
+            // Adjust frame rate for performance
+            setTimeout(() => {
+                animationId = requestAnimationFrame(detectFrame);
+            }, isDetecting ? 50 : 100); // ~20 FPS when detecting
         }
 
         // Button event listeners
         pauseBtn.addEventListener('click', () => {
             isDetecting = !isDetecting;
             pauseBtn.textContent = isDetecting ? 'Pause Detection' : 'Resume Detection';
-            statusDesc.textContent = isDetecting ? 'Detection resumed' : 'Detection paused';
+            statusDesc.textContent = isDetecting ? 'High-precision detection resumed' : 'Detection paused';
             
             if (isDetecting && !animationId) {
                 detectFrame();
@@ -458,7 +565,7 @@
             totalCount.textContent = '0';
             confidenceFill.style.width = '0%';
             confidenceLabel.textContent = 'Avg Confidence: 0%';
-            statusDesc.textContent = 'Counts reset';
+            statusDesc.textContent = 'Counts reset - High-precision detection active';
             
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         });
@@ -466,6 +573,7 @@
         // Draggable panel functionality
         let startY = 0;
         let startHeight = 0;
+        let dragging = false;
         const minHeight = 100;
         const maxHeight = 400;
 
@@ -476,6 +584,7 @@
             dragging = true;
             startY = e.type === 'mousedown' ? e.clientY : e.touches[0].clientY;
             startHeight = bottomWrapper.offsetHeight;
+            dragHandle.style.cursor = 'grabbing';
             
             document.addEventListener('mousemove', doDrag);
             document.addEventListener('touchmove', doDrag);
@@ -501,13 +610,14 @@
 
         function stopDrag() {
             dragging = false;
+            dragHandle.style.cursor = 'grab';
             document.removeEventListener('mousemove', doDrag);
             document.removeEventListener('touchmove', doDrag);
             document.removeEventListener('mouseup', stopDrag);
             document.removeEventListener('touchend', stopDrag);
         }
 
-        // Start the application
+        // Initialize
         startCamera();
     </script>
 </body>
