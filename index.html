@@ -159,8 +159,8 @@
 
         async function loadModel() {
             try {
-                model = await tf.loadGraphModel('best_web_model/model.json');
-                statusDesc.textContent = 'Model loaded – detecting! Point at plants';
+                model = await tf.loadGraphModel('best_model_web/model.json');
+                statusDesc.textContent = 'Model loaded – detecting! Point at plants_new';
                 console.log('Model loaded successfully');
                 detectFrame();
             } catch (e) {
@@ -359,3 +359,4 @@
     </script>
 </body>
 </html>
+
