@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+ <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
@@ -122,27 +122,13 @@
         const seenObjects = new Set();
         const objectLabels = new Map();
 
-        // Updated camera constraints with higher quality
         const constraints = {
             video: {
                 facingMode: { ideal: 'environment' },
-                width: { min: 1280, ideal: 1920, max: 2560 },
-                height: { min: 720, ideal: 1080, max: 1440 },
-                frameRate: { ideal: 60, min: 30 },
-                aspectRatio: { ideal: 16/9 },
-                resizeMode: 'crop-and-scale',
-                advanced: [
-                    { focusMode: 'continuous' },
-                    { exposureMode: 'continuous' },
-                    { whiteBalanceMode: 'continuous' }
-                ]
-            },
-            audio: false
+                width: { min: 1280, ideal: 1920 },
+                height: { min: 720, ideal: 1080 },
+            }
         };
-
-        // Updated thresholds
-        const CONFIDENCE_THRESHOLD = 0.5; // Increased from 0.3
-        const IOU_THRESHOLD = 0.4; // Increased from 0.4
 
         function resizeCanvas() {
             canvas.width = video.videoWidth;
@@ -156,40 +142,25 @@
                 video.onloadedmetadata = () => {
                     video.play();
                     resizeCanvas();
-                    statusDesc.textContent = 'High-quality camera ready';
+                    statusDesc.textContent = 'Camera ready';
                     loadModel();
                 };
                 video.onresize = resizeCanvas;
             } catch (e) {
-                console.error('Camera error:', e);
-                statusDesc.textContent = 'Camera failed - trying basic mode';
-                
-                // Try basic constraints as fallback
-                try {
-                    const basicConstraints = {
-                        video: {
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 },
-                            facingMode: 'environment'
-                        },
-                        audio: false
-                    };
-                    
-                    const stream = await navigator.mediaDevices.getUserMedia(basicConstraints);
-                    video.srcObject = stream;
-                    video.play();
-                    loadModel();
-                } catch (fallbackError) {
-                    statusDesc.textContent = 'Cannot access camera';
-                    console.error('Fallback also failed:', fallbackError);
-                }
+                console.error(e);
+                const fallback = { video: true };
+                const stream = await navigator.mediaDevices.getUserMedia(fallback);
+                video.srcObject = stream;
+                video.play();
+                statusDesc.textContent = 'Camera ready (basic)';
+                loadModel();
             }
         }
 
         async function loadModel() {
             try {
-                model = await tf.loadGraphModel('best_model_web/model.json');
-                statusDesc.textContent = 'High-precision model loaded – detecting with 70%+ confidence';
+                model = await tf.loadGraphModel('best_web_model/model.json');
+                statusDesc.textContent = 'Model loaded – detecting! Point at plants';
                 console.log('Model loaded successfully');
                 detectFrame();
             } catch (e) {
@@ -199,7 +170,7 @@
         }
 
         // Simple NMS
-        function nonMaxSuppression(boxes, scores, iouThreshold = IOU_THRESHOLD) {
+        function nonMaxSuppression(boxes, scores, iouThreshold = 0.4) {
             const indices = [];
             const sorted = scores.map((s, i) => ({score: s, index: i})).sort((a, b) => b.score - a.score);
 
@@ -286,7 +257,7 @@
                 const conf = Math.max(weedConf, cropConf);
                 const classId = weedConf > cropConf ? 0 : 1; // 0=weed, 1=crop
 
-                if (conf < CONFIDENCE_THRESHOLD) continue; // Updated threshold
+                if (conf < 0.3) continue; // Lower threshold
 
                 const x = (cx - w / 2) * 640;
                 const y = (cy - h / 2) * 640;
@@ -300,11 +271,11 @@
                 });
             }
 
-            // NMS with updated threshold
+            // NMS
             if (rawDetections.length > 0) {
                 const boxes = rawDetections.map(d => d.bbox);
                 const scores = rawDetections.map(d => d.confidence);
-                const indices = nonMaxSuppression(boxes, scores, IOU_THRESHOLD);
+                const indices = nonMaxSuppression(boxes, scores, 0.4);
 
                 const detections = indices.map(idx => {
                     const d = rawDetections[idx];
@@ -345,9 +316,9 @@
                     avgConf = detections.reduce((s, d) => s + d.confidence, 0) / detections.length;
                     confidenceFill.style.width = `${avgConf * 100}%`;
                     confidenceLabel.textContent = `Avg Confidence: ${(avgConf * 100).toFixed(1)}%`;
-                    statusDesc.textContent = `Detected ${detections.length} objects (70%+ confidence)`;
+                    statusDesc.textContent = `Detected ${detections.length} objects`;
                 } else {
-                    statusDesc.textContent = 'No high-confidence detections – move closer/improve lighting';
+                    statusDesc.textContent = 'No plants detected – try better lighting/closer';
                 }
 
                 // Draw
