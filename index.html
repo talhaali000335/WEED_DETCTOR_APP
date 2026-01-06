@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>AgriVision AI • Professional Weed & Crop Detection</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        .container { height: 100vh; display: flex; flex-direction: column; position: relative; background: linear-gradient(135deg, #0f0f0f 0%, #000 100%); }
+
+        .status-bar {
+            position: absolute; top: 16px; left: 16px; right: 16px; z-index: 100;
+            background: rgba(20,20,20,0.6); backdrop-filter: blur(12px);
+            border-radius: 16px; padding: 12px 16px; border: 1px solid rgba(255,255,255,0.08);
+            display: flex; align-items: center; gap: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #00ff9d; box-shadow: 0 0 12px #00ff9d88; }
+        .status-text { flex: 1; }
+        .status-title { font-size: 14px; font-weight: 600; color: #00ff9d; }
+        .status-desc { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+        .frame-count { background: rgba(255,255,255,0.08); padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 500; }
+
+        .detection-area { flex: 1; position: relative; overflow: hidden; }
+        #video { width: 100%; height: 100%; object-fit: cover; }
+        canvas { position: absolute; inset: 0; }
+
+        .bottom-panel-wrapper { position: absolute; bottom: 0; left: 0; right: 0; z-index: 50; transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1); }
+        .bottom-panel {
+            background: rgba(15,15,15,0.92); backdrop-filter: blur(20px);
+            border-top-left-radius: 24px; border-top-right-radius: 24px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            box-shadow: 0 -8px 40px rgba(0,0,0,0.6); padding: 0 20px 20px; touch-action: pan-y;
+        }
+        .drag-handle { width: 40px; height: 4px; background: rgba(255,255,255,0.3); border-radius: 2px; margin: 12px auto; cursor: grab; }
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 20px 0; }
+        .stat-card {
+            background: rgba(255,255,255,0.05); border-radius: 16px; padding: 16px; text-align: center;
+            border: 1px solid rgba(255,255,255,0.08); transition: all 0.3s ease;
+        }
+        .stat-card:hover { transform: translateY(-4px); background: rgba(255,255,255,0.08); }
+        .stat-icon { font-size: 28px; margin-bottom: 8px; }
+        .stat-value { font-size: 28px; font-weight: 700; margin: 4px 0; }
+        .stat-label { font-size: 13px; opacity: 0.7; }
+        .confidence-bar { height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; margin: 12px 0; }
+        .confidence-fill { height: 100%; background: linear-gradient(90deg, #00ff9d, #4CAF50); transition: width 0.6s ease; }
+        .bottom-actions { display: flex; justify-content: space-around; margin-top: 16px; }
+        .action-btn {
+            background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+            color: white; padding: 12px 24px; border-radius: 12px; font-weight: 500; cursor: pointer; transition: all 0.3s;
+        }
+        .action-btn:hover { background: rgba(255,255,255,0.15); transform: translateY(-2px); }
+        .primary-btn { background: #4CAF50; border-color: #4CAF50; }
+        .primary-btn:hover { background: #43A047; }
+
+        @media (max-width: 600px) {
+            .stats-grid { gap: 12px; }
+            .stat-value { font-size: 22px; }
+            .action-btn { padding: 10px 16px; font-size: 14px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-bar">
+            <div class="status-dot"></div>
+            <div class="status-text">
+                <p class="status-title" id="detection-title">Live Detection Active</p>
+                <p class="status-desc" id="status-desc">Point camera at plants</p>
+            </div>
+            <div class="frame-count">Frame: <span id="frame-count">0</span></div>
+        </div>
+
+        <div class="detection-area">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div class="bottom-panel-wrapper" id="bottom-wrapper">
+            <div class="bottom-panel">
+                <div class="drag-handle" id="drag-handle"></div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">🌿</div>
+                        <div class="stat-value" id="crop-count">0</div>
+                        <div class="stat-label">Crops</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⚠️</div>
+                        <div class="stat-value" id="weed-count">0</div>
+                        <div class="stat-label">Weeds</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-value" id="total-count">0</div>
+                        <div class="stat-label">Total</div>
+                    </div>
+                </div>
+
+                <div class="confidence-bar">
+                    <div class="confidence-fill" id="confidence-fill"></div>
+                </div>
+                <div class="progress-label" id="confidence-label">Avg Confidence: 0%</div>
+
+                <div class="bottom-actions">
+                    <button class="action-btn" id="pause-btn">Pause Detection</button>
+                    <button class="action-btn primary-btn" id="reset-btn">Reset Counts</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusDesc = document.getElementById('status-desc');
+        const detectionTitle = document.getElementById('detection-title');
+        const frameCount = document.getElementById('frame-count');
+        const cropCount = document.getElementById('crop-count');
+        const weedCount = document.getElementById('weed-count');
+        const totalCount = document.getElementById('total-count');
+        const confidenceFill = document.getElementById('confidence-fill');
+        const confidenceLabel = document.getElementById('confidence-label');
+        const pauseBtn = document.getElementById('pause-btn');
+        const resetBtn = document.getElementById('reset-btn');
+        const bottomWrapper = document.getElementById('bottom-wrapper');
+        const dragHandle = document.getElementById('drag-handle');
+
+        let model;
+        let isDetecting = true;
+        let frameNum = 0;
+        let totalWeeds = 0;
+        let totalCrops = 0;
+        let avgConf = 0;
+        let lastY = 0;
+        let dragging = false;
+
+        // Tracking IDs
+        let weedId = 0;
+        let cropId = 0;
+        const seenObjects = new Set();
+        const objectLabels = new Map();
+
+        // Resize canvas to match video
+        function resizeCanvas() {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+        }
+
+        // Start webcam
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    resizeCanvas();
+                    statusDesc.textContent = 'Camera ready';
+                    loadModel();
+                };
+            } catch (e) {
+                statusDesc.textContent = 'Camera error';
+                console.error(e);
+            }
+        }
+
+        // Load your YOLO11 TF.js model
+        async function loadModel() {
+            try {
+                model = await tf.loadGraphModel('best_model_web/model.json'); // Folder next to index.html
+                statusDesc.textContent = 'Model loaded – detecting!';
+                detectFrame();
+            } catch (e) {
+                statusDesc.textContent = 'Model load failed';
+                console.error(e);
+            }
+        }
+
+        // Live detection loop
+        async function detectFrame() {
+            if (!isDetecting || !model) {
+                requestAnimationFrame(detectFrame);
+                return;
+            }
+
+            frameNum++;
+            frameCount.textContent = frameNum;
+
+            tf.engine().startScope();
+
+            const img = tf.browser.fromPixels(video);
+            const resized = tf.image.resizeBilinear(img, [640, 640]);
+            const normalized = resized.div(255.0);
+            const batched = normalized.expandDims(0);
+
+            const preds = await model.executeAsync(batched);
+
+            // YOLO11 TF.js output parsing (adjust if your model differs)
+            const output = preds[0];
+            const [batch, numBoxes, data] = output.shape;
+            const boxesData = await output.array();
+
+            const detections = [];
+            const seenThisFrame = new Set();
+
+            for (let i = 0; i < numBoxes; i++) {
+                const row = boxesData[0][i];
+                const [cx, cy, w, h, ...classScores] = row;
+
+                const maxScore = Math.max(...classScores);
+                const classId = classScores.indexOf(maxScore);
+
+                if (maxScore < 0.65) continue;
+
+                const x = (cx - w / 2) * 640;
+                const y = (cy - h / 2) * 640;
+                const width = w * 640;
+                const height = h * 640;
+
+                const objectId = `${classId}_${x.toFixed(0)}_${y.toFixed(0)}_${width.toFixed(0)}_${height.toFixed(0)}`;
+
+                let label;
+                if (!seenObjects.has(objectId)) {
+                    seenObjects.add(objectId);
+                    if (classId === 0) { // weed
+                        weedId++;
+                        totalWeeds++;
+                        label = `WEED #${weedId}`;
+                    } else { // crop
+                        cropId++;
+                        totalCrops++;
+                        label = `CROP #${cropId}`;
+                    }
+                    objectLabels.set(objectId, label);
+                } else {
+                    label = objectLabels.get(objectId);
+                }
+
+                seenThisFrame.add(objectId);
+
+                detections.push({
+                    label,
+                    confidence: maxScore,
+                    bbox: [x, y, width, height],
+                    class: classId === 0 ? 'weed' : 'crop'
+                });
+            }
+
+            // Update counts
+            totalCount.textContent = totalWeeds + totalCrops;
+            weedCount.textContent = totalWeeds;
+            cropCount.textContent = totalCrops;
+
+            if (detections.length > 0) {
+                avgConf = detections.reduce((sum, d) => sum + d.confidence, 0) / detections.length;
+                confidenceFill.style.width = `${avgConf * 100}%`;
+                confidenceLabel.textContent = `Avg Confidence: ${(avgConf * 100).toFixed(1)}%`;
+                statusDesc.textContent = `Detected ${detections.length} objects`;
+            }
+
+            // Draw on canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            detections.forEach(d => {
+                const scaleX = canvas.width / 640;
+                const scaleY = canvas.height / 640;
+
+                const sx = d.bbox[0] * scaleX;
+                const sy = d.bbox[1] * scaleY;
+                const sw = d.bbox[2] * scaleX;
+                const sh = d.bbox[3] * scaleY;
+
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
+                ctx.fillStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
+                ctx.strokeRect(sx, sy, sw, sh);
+
+                // Label background
+                ctx.fillRect(sx, sy - 30, 140, 30);
+
+                // Label text
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 14px Inter';
+                ctx.fillText(`${d.label} ${(d.confidence * 100).toFixed(0)}%`, sx + 8, sy - 10);
+
+                // Center circle
+                const cx = sx + sw / 2;
+                const cy = sy + sh / 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+                ctx.fillStyle = d.class === 'weed' ? 'rgba(255,68,68,0.2)' : 'rgba(68,170,68,0.2)';
+                ctx.fill();
+                ctx.strokeStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+
+            tf.engine().endScope();
+
+            requestAnimationFrame(detectFrame);
+        }
+
+        // Draggable panel
+        dragHandle.addEventListener('mousedown', e => { dragging = true; lastY = e.clientY; });
+        document.addEventListener('mousemove', e => {
+            if (!dragging) return;
+            const delta = lastY - e.clientY;
+            const current = parseInt(bottomWrapper.style.bottom || 0);
+            bottomWrapper.style.bottom = Math.max(0, Math.min(current + delta, 300)) + 'px';
+            lastY = e.clientY;
+        });
+        document.addEventListener('mouseup', () => dragging = false);
+
+        // Touch support
+        dragHandle.addEventListener('touchstart', e => { dragging = true; lastY = e.touches[0].clientY; e.preventDefault(); });
+        document.addEventListener('touchmove', e => {
+            if (!dragging) return;
+            const delta = lastY - e.touches[0].clientY;
+            const current = parseInt(bottomWrapper.style.bottom || 0);
+            bottomWrapper.style.bottom = Math.max(0, Math.min(current + delta, 300)) + 'px';
+            lastY = e.touches[0].clientY;
+        });
+        document.addEventListener('touchend', () => dragging = false);
+
+        // Buttons
+        pauseBtn.addEventListener('click', () => {
+            isDetecting = !isDetecting;
+            pauseBtn.textContent = isDetecting ? 'Pause Detection' : 'Resume Detection';
+            detectionTitle.textContent = isDetecting ? 'Live Detection Active' : 'Detection Paused';
+        });
+
+        resetBtn.addEventListener('click', () => {
+            totalWeeds = totalCrops = 0;
+            weedId = cropId = 0;
+            seenObjects.clear();
+            objectLabels.clear();
+            weedCount.textContent = 0;
+            cropCount.textContent = 0;
+            totalCount.textContent = 0;
+            confidenceFill.style.width = '0%';
+            confidenceLabel.textContent = 'Avg Confidence: 0%';
+            statusDesc.textContent = 'Reset complete';
+        });
+
+        // Start
+        startCamera();
+    </script>
+</body>
+</html>
