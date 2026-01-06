@@ -114,7 +114,7 @@
         let cropId = 0;
         const seenObjects = new Set();
         const objectLabels = new Map();
-        // CAMERA SETTINGS FROM OLD CODE (high quality)
+        // CAMERA SETTINGS (high quality)
         const constraints = {
             video: {
                 facingMode: { ideal: 'environment' },
@@ -123,13 +123,12 @@
             }
         };
         // THRESHOLDS
-        const CONFIDENCE_THRESHOLD = 0.7; // Increased to 0.7 as per comment
-        const IOU_THRESHOLD = 0.6; // Increased to 0.6 as per comment
+        const CONFIDENCE_THRESHOLD = 0.7;
+        const IOU_THRESHOLD = 0.6;
         function resizeCanvas() {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
         }
-        // CAMERA START FROM OLD CODE
         async function startCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -144,7 +143,6 @@
             } catch (e) {
                 console.error(e);
                 statusDesc.textContent = 'Camera failed - using fallback';
-                // Try basic constraints
                 try {
                     const fallback = { video: true };
                     const stream = await navigator.mediaDevices.getUserMedia(fallback);
@@ -157,17 +155,14 @@
                 }
             }
         }
-        // MODEL LOADING FROM NEW CODE (with multiple paths)
         async function loadModel() {
             try {
-                // Try different model paths
                 const modelPaths = [
                     'best_model_web/model.json',
                     'model.json',
                     './model.json',
                     'best/model.json'
                 ];
-               
                 let modelLoaded = false;
                 for (const path of modelPaths) {
                     try {
@@ -180,11 +175,9 @@
                         console.log(`Failed to load from ${path}:`, e.message);
                     }
                 }
-               
                 if (!modelLoaded) {
                     throw new Error('Could not load model from any path');
                 }
-               
                 statusDesc.textContent = 'High-precision model loaded – detecting with 70%+ confidence';
                 detectFrame();
             } catch (e) {
@@ -192,7 +185,6 @@
                 statusDesc.textContent = 'Model load failed – check console';
             }
         }
-        // FIXED NMS FUNCTION FROM NEW CODE (no const reassignment bug)
         function nonMaxSuppression(boxes, scores, iouThreshold = IOU_THRESHOLD) {
             const indices = [];
             let remaining = scores.map((s, i) => ({score: s, index: i}))
@@ -218,10 +210,8 @@
             const box1Area = w1 * h1;
             const box2Area = w2 * h2;
             const unionArea = box1Area + box2Area - interArea;
-           
             return unionArea > 0 ? interArea / unionArea : 0;
         }
-        // DETECTION LOGIC FROM NEW CODE (with proper tensor cleanup)
         async function detectFrame() {
             if (!isDetecting || !model || !video.videoWidth) {
                 animationId = requestAnimationFrame(detectFrame);
@@ -235,7 +225,6 @@
                 const resized = tf.image.resizeBilinear(img, [640, 640]);
                 const normalized = resized.div(255.0);
                 const batched = normalized.expandDims(0);
-                // Use model.execute() instead of executeAsync() when possible
                 let prediction;
                 try {
                     prediction = await model.executeAsync(batched);
@@ -243,75 +232,63 @@
                     console.log('Async execution failed, trying sync:', asyncError.message);
                     prediction = model.execute(batched);
                 }
-                // Handle prediction output
                 let output = Array.isArray(prediction) ? prediction[0] : prediction;
-               
-                // Log for debugging
                 console.log('Output shape:', output.shape);
-                // Process based on shape
                 const shape = output.shape;
                 const data = await output.data();
-               
                 const rawDetections = [];
-               
                 if (shape[1] === 6 && shape[2] === 8400) {
-                    // Shape: [1, 6, 8400] - standard YOLO format
+                    // Shape: [1, 6, 8400] - channels first
                     for (let i = 0; i < 8400; i++) {
-                        const cx = data[i];
-                        const cy = data[8400 + i];
-                        const w = data[16800 + i];
-                        const h = data[25200 + i];
+                        const x1 = data[i];
+                        const y1 = data[8400 + i];
+                        const x2 = data[16800 + i];
+                        const y2 = data[25200 + i];
                         const weedConf = data[33600 + i];
                         const cropConf = data[42000 + i];
                         const conf = Math.max(weedConf, cropConf);
-                        if (conf < CONFIDENCE_THRESHOLD) continue; // Use higher threshold
+                        if (conf < CONFIDENCE_THRESHOLD) continue;
                         const classId = weedConf > cropConf ? 0 : 1;
-                        const x = cx - w / 2;
-                        const y = cy - h / 2;
-                        const width = w;
-                        const height = h;
+                        const width = x2 - x1;
+                        const height = y2 - y1;
                         if (width > 0 && height > 0) {
                             rawDetections.push({
-                                bbox: [x, y, width, height],
+                                bbox: [x1, y1, width, height],
                                 confidence: conf,
                                 classId
                             });
                         }
                     }
                 } else if (shape[1] === 8400 && shape[2] === 6) {
-                    // Shape: [1, 8400, 6] - transposed format
+                    // Shape: [1, 8400, 6] - detections first
                     for (let i = 0; i < 8400; i++) {
                         const offset = i * 6;
-                        const cx = data[offset];
-                        const cy = data[offset + 1];
-                        const w = data[offset + 2];
-                        const h = data[offset + 3];
+                        const x1 = data[offset];
+                        const y1 = data[offset + 1];
+                        const x2 = data[offset + 2];
+                        const y2 = data[offset + 3];
                         const weedConf = data[offset + 4];
                         const cropConf = data[offset + 5];
                         const conf = Math.max(weedConf, cropConf);
-                        if (conf < CONFIDENCE_THRESHOLD) continue; // Use higher threshold
+                        if (conf < CONFIDENCE_THRESHOLD) continue;
                         const classId = weedConf > cropConf ? 0 : 1;
-                        const x = cx - w / 2;
-                        const y = cy - h / 2;
-                        const width = w;
-                        const height = h;
+                        const width = x2 - x1;
+                        const height = y2 - y1;
                         if (width > 0 && height > 0) {
                             rawDetections.push({
-                                bbox: [x, y, width, height],
+                                bbox: [x1, y1, width, height],
                                 confidence: conf,
                                 classId
                             });
                         }
                     }
                 }
-                // Clean up tensors
                 img.dispose();
                 resized.dispose();
                 normalized.dispose();
                 batched.dispose();
                 output.dispose();
                 if (prediction && prediction.dispose) prediction.dispose();
-                // Apply NMS if we have detections
                 if (rawDetections.length > 0) {
                     const boxes = rawDetections.map(d => d.bbox);
                     const scores = rawDetections.map(d => d.confidence);
@@ -319,9 +296,8 @@
                     const detections = indices.map(idx => {
                         const d = rawDetections[idx];
                         const isWeed = d.classId === 0;
-                        // Improved tracking: use rounded centroid with tolerance (e.g., round to 10px) to handle jitter
-                        const centX = Math.round(d.bbox[0] + d.bbox[2] / 2 / 10) * 10;
-                        const centY = Math.round(d.bbox[1] + d.bbox[3] / 2 / 10) * 10;
+                        const centX = Math.round((d.bbox[0] + d.bbox[2] / 2) / 10) * 10;
+                        const centY = Math.round((d.bbox[1] + d.bbox[3] / 2) / 10) * 10;
                         const objectId = `${d.classId}_${centX}_${centY}`;
                         let label;
                         if (!seenObjects.has(objectId)) {
@@ -346,7 +322,6 @@
                             class: isWeed ? 'weed' : 'crop'
                         };
                     });
-                    // Update stats
                     totalCount.textContent = totalWeeds + totalCrops;
                     weedCount.textContent = totalWeeds;
                     cropCount.textContent = totalCrops;
@@ -359,9 +334,7 @@
                     } else {
                         statusDesc.textContent = 'No high-confidence detections – move closer/improve lighting';
                     }
-                    // Draw detections
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
-                   
                     detections.forEach(d => {
                         const scaleX = canvas.width / 640;
                         const scaleY = canvas.height / 640;
@@ -369,24 +342,19 @@
                         let sy = d.bbox[1] * scaleY;
                         let sw = d.bbox[2] * scaleX;
                         let sh = d.bbox[3] * scaleY;
-                        // Clip to avoid off-screen or negative
                         sx = Math.max(0, sx);
                         sy = Math.max(0, sy);
                         sw = Math.min(canvas.width - sx, sw);
                         sh = Math.min(canvas.height - sy, sh);
-                        // Draw bounding box
                         ctx.lineWidth = 3;
                         ctx.strokeStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
                         ctx.strokeRect(sx, sy, sw, sh);
-                        // Draw label background
                         const labelText = `${d.label} ${(d.confidence * 100).toFixed(0)}%`;
                         ctx.font = 'bold 14px Inter';
                         const textWidth = ctx.measureText(labelText).width;
                         const labelWidth = textWidth + 20;
-                       
                         ctx.fillStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
                         ctx.fillRect(sx, sy - 30, labelWidth, 30);
-                        // Draw label text
                         ctx.fillStyle = 'white';
                         ctx.font = 'bold 14px Inter';
                         ctx.fillText(labelText, sx + 10, sy - 10);
@@ -401,12 +369,10 @@
             tf.engine().endScope();
             animationId = requestAnimationFrame(detectFrame);
         }
-        // Button event listeners from new code
         pauseBtn.addEventListener('click', () => {
             isDetecting = !isDetecting;
             pauseBtn.textContent = isDetecting ? 'Pause Detection' : 'Resume Detection';
             statusDesc.textContent = isDetecting ? 'Detection resumed' : 'Detection paused';
-           
             if (isDetecting && !animationId) {
                 detectFrame();
             }
@@ -418,17 +384,15 @@
             cropId = 0;
             seenObjects.clear();
             objectLabels.clear();
-           
             weedCount.textContent = '0';
             cropCount.textContent = '0';
             totalCount.textContent = '0';
             confidenceFill.style.width = '0%';
             confidenceLabel.textContent = 'Avg Confidence: 0%';
             statusDesc.textContent = 'Counts reset';
-           
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         });
-        // Draggable panel functionality
+        // Draggable panel
         let startY = 0;
         let startHeight = 0;
         const minHeight = 100;
@@ -439,24 +403,18 @@
             dragging = true;
             startY = e.type === 'mousedown' ? e.clientY : e.touches[0].clientY;
             startHeight = bottomWrapper.offsetHeight;
-           
             document.addEventListener('mousemove', doDrag);
             document.addEventListener('touchmove', doDrag);
             document.addEventListener('mouseup', stopDrag);
             document.addEventListener('touchend', stopDrag);
-           
             e.preventDefault();
         }
         function doDrag(e) {
             if (!dragging) return;
-           
             const currentY = e.type === 'mousedown' ? e.clientY : e.touches[0].clientY;
             const deltaY = startY - currentY;
             let newHeight = startHeight + deltaY;
-           
-            // Constrain height
             newHeight = Math.max(minHeight, Math.min(maxHeight, newHeight));
-           
             bottomWrapper.style.height = `${newHeight}px`;
             e.preventDefault();
         }
@@ -467,7 +425,6 @@
             document.removeEventListener('mouseup', stopDrag);
             document.removeEventListener('touchend', stopDrag);
         }
-        // Start the application
         startCamera();
     </script>
 </body>
