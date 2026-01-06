@@ -203,7 +203,7 @@
         // Load your YOLO11 TF.js model
         async function loadModel() {
             try {
-                model = await tf.loadGraphModel('best_web_model/model.json'); // Folder next to index.html
+                model = await tf.loadGraphModel('best_model_web/model.json'); // Folder next to index.html
                 statusDesc.textContent = 'Model loaded – detecting!';
                 detectFrame();
             } catch (e) {
@@ -379,3 +379,4 @@
     </script>
 </body>
 </html>
+
