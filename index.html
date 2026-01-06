@@ -79,9 +79,9 @@
                 </div>
 
                 <div class="confidence-bar">
-                    <div class="confidence-fill" id="confidence-fill"></div>
+                    <div class="confidence-fill" id="confidence-fill" style="width: 0%"></div>
                 </div>
-                <div class="progress-label" id="confidence-label">Avg Confidence: 0%</div>
+                <div class="confidence-label" id="confidence-label" style="text-align: center; font-size: 12px; margin-top: 4px;">Avg Confidence: 0%</div>
 
                 <div class="bottom-actions">
                     <button class="action-btn" id="pause-btn">Pause Detection</button>
@@ -115,6 +115,7 @@
         let avgConf = 0;
         let lastY = 0;
         let dragging = false;
+        let animationId = null;
 
         // Tracking IDs
         let weedId = 0;
@@ -125,14 +126,16 @@
         const constraints = {
             video: {
                 facingMode: { ideal: 'environment' },
-                width: { min: 1280, ideal: 1920 },
-                height: { min: 720, ideal: 1080 },
+                width: { min: 640, ideal: 1280 },
+                height: { min: 480, ideal: 720 },
             }
         };
 
         function resizeCanvas() {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
+            if (video.videoWidth && video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
         }
 
         async function startCamera() {
@@ -147,38 +150,68 @@
                 };
                 video.onresize = resizeCanvas;
             } catch (e) {
-                console.error(e);
-                const fallback = { video: true };
-                const stream = await navigator.mediaDevices.getUserMedia(fallback);
-                video.srcObject = stream;
-                video.play();
-                statusDesc.textContent = 'Camera ready (basic)';
-                loadModel();
+                console.error('Camera error:', e);
+                statusDesc.textContent = 'Camera failed - using fallback';
+                // Try basic constraints
+                try {
+                    const fallback = { video: true };
+                    const stream = await navigator.mediaDevices.getUserMedia(fallback);
+                    video.srcObject = stream;
+                    video.play();
+                    loadModel();
+                } catch (fallbackError) {
+                    statusDesc.textContent = 'Cannot access camera';
+                    console.error('Fallback also failed:', fallbackError);
+                }
             }
         }
 
         async function loadModel() {
             try {
-                model = await tf.loadGraphModel('best_model_web/model.json');
-                statusDesc.textContent = 'Model loaded – detecting! Point at plants_new';
-                console.log('Model loaded successfully');
+                // Try different model paths
+                const modelPaths = [
+                    'best_model_web/model.json',
+                    'model.json',
+                    './model.json',
+                    'best/model.json'
+                ];
+                
+                let modelLoaded = false;
+                for (const path of modelPaths) {
+                    try {
+                        console.log(`Trying to load model from: ${path}`);
+                        model = await tf.loadGraphModel(path);
+                        console.log('✅ Model loaded successfully from:', path);
+                        modelLoaded = true;
+                        break;
+                    } catch (e) {
+                        console.log(`Failed to load from ${path}:`, e.message);
+                    }
+                }
+                
+                if (!modelLoaded) {
+                    throw new Error('Could not load model from any path');
+                }
+                
+                statusDesc.textContent = 'Model loaded – detecting! Point at plants';
                 detectFrame();
             } catch (e) {
+                console.error('Model load error:', e);
                 statusDesc.textContent = 'Model load failed – check console';
-                console.error(e);
             }
         }
 
-        // Simple NMS
+        // Fixed NMS function - no const reassignment
         function nonMaxSuppression(boxes, scores, iouThreshold = 0.4) {
             const indices = [];
-            const sorted = scores.map((s, i) => ({score: s, index: i})).sort((a, b) => b.score - a.score);
+            let remaining = scores.map((s, i) => ({score: s, index: i}))
+                                  .sort((a, b) => b.score - a.score);
 
-            while (sorted.length > 0) {
-                const best = sorted.shift();
+            while (remaining.length > 0) {
+                const best = remaining.shift();
                 indices.push(best.index);
 
-                sorted = sorted.filter(item => {
+                remaining = remaining.filter(item => {
                     const iou = calculateIOU(boxes[best.index], boxes[item.index]);
                     return iou <= iouThreshold;
                 });
@@ -198,12 +231,14 @@
             const interArea = Math.max(0, xi2 - xi1) * Math.max(0, yi2 - yi1);
             const box1Area = w1 * h1;
             const box2Area = w2 * h2;
-            return interArea / (box1Area + box2Area - interArea);
+            const unionArea = box1Area + box2Area - interArea;
+            
+            return unionArea > 0 ? interArea / unionArea : 0;
         }
 
         async function detectFrame() {
-            if (!isDetecting || !model) {
-                requestAnimationFrame(detectFrame);
+            if (!isDetecting || !model || !video.videoWidth) {
+                animationId = requestAnimationFrame(detectFrame);
                 return;
             }
 
@@ -212,151 +247,268 @@
 
             tf.engine().startScope();
 
-            const img = tf.browser.fromPixels(video);
-            const resized = tf.image.resizeBilinear(img, [640, 640]);
-            const normalized = resized.div(255.0);
-            const batched = normalized.expandDims(0);
-
-            let prediction;
             try {
-                prediction = await model.executeAsync(batched);
-            } catch (e) {
-                console.error('Execution error:', e);
-                tf.engine().endScope();
-                requestAnimationFrame(detectFrame);
-                return;
-            }
+                const img = tf.browser.fromPixels(video);
+                const resized = tf.image.resizeBilinear(img, [640, 640]);
+                const normalized = resized.div(255.0);
+                const batched = normalized.expandDims(0);
 
-            console.log('Raw prediction:', prediction);
+                // Use model.execute() instead of executeAsync() when possible
+                let prediction;
+                try {
+                    prediction = await model.executeAsync(batched);
+                } catch (asyncError) {
+                    console.log('Async execution failed, trying sync:', asyncError.message);
+                    prediction = model.execute(batched);
+                }
 
-            // Handle single tensor or array
-            let output = Array.isArray(prediction) ? prediction[0] : prediction;
+                // Handle prediction output
+                let output = Array.isArray(prediction) ? prediction[0] : prediction;
+                
+                // Log for debugging
+                console.log('Output shape:', output.shape);
 
-            // Log shape
-            console.log('Output shape:', output.shape);
+                // Process based on shape
+                const shape = output.shape;
+                const data = await output.data();
+                
+                const rawDetections = [];
+                
+                if (shape[1] === 6 && shape[2] === 8400) {
+                    // Shape: [1, 6, 8400] - standard YOLO format
+                    for (let i = 0; i < 8400; i++) {
+                        const cx = data[i];
+                        const cy = data[8400 + i];
+                        const w = data[16800 + i];
+                        const h = data[25200 + i];
+                        const weedConf = data[33600 + i];
+                        const cropConf = data[42000 + i];
 
-            // Transpose if needed (common for Ultralytics: [1, 6, 8400] -> [1, 8400, 6])
-            if (output.shape[1] === 6 && output.shape[2] === 8400) {
-                output = output.transpose([0, 2, 1]);
-            }
+                        const conf = Math.max(weedConf, cropConf);
+                        if (conf < 0.3) continue;
 
-            const data = await output.data();
-            const numBoxes = output.shape[1];
+                        const classId = weedConf > cropConf ? 0 : 1;
+                        const x = (cx - w / 2) * 640;
+                        const y = (cy - h / 2) * 640;
+                        const width = w * 640;
+                        const height = h * 640;
 
-            const rawDetections = [];
-
-            for (let i = 0; i < numBoxes; i++) {
-                const offset = i * 6;
-                const cx = data[offset];
-                const cy = data[offset + 1];
-                const w = data[offset + 2];
-                const h = data[offset + 3];
-                const weedConf = data[offset + 4];
-                const cropConf = data[offset + 5];
-
-                const conf = Math.max(weedConf, cropConf);
-                const classId = weedConf > cropConf ? 0 : 1; // 0=weed, 1=crop
-
-                if (conf < 0.3) continue; // Lower threshold
-
-                const x = (cx - w / 2) * 640;
-                const y = (cy - h / 2) * 640;
-                const width = w * 640;
-                const height = h * 640;
-
-                rawDetections.push({
-                    bbox: [x, y, width, height],
-                    confidence: conf,
-                    classId
-                });
-            }
-
-            // NMS
-            if (rawDetections.length > 0) {
-                const boxes = rawDetections.map(d => d.bbox);
-                const scores = rawDetections.map(d => d.confidence);
-                const indices = nonMaxSuppression(boxes, scores, 0.4);
-
-                const detections = indices.map(idx => {
-                    const d = rawDetections[idx];
-                    const isWeed = d.classId === 0;
-                    const objectId = `${d.classId}_${d.bbox[0].toFixed(0)}_${d.bbox[1].toFixed(0)}`;
-
-                    let label;
-                    if (!seenObjects.has(objectId)) {
-                        seenObjects.add(objectId);
-                        if (isWeed) {
-                            weedId++;
-                            totalWeeds++;
-                            label = `WEED #${weedId}`;
-                        } else {
-                            cropId++;
-                            totalCrops++;
-                            label = `CROP #${cropId}`;
+                        if (width > 0 && height > 0) {
+                            rawDetections.push({
+                                bbox: [x, y, width, height],
+                                confidence: conf,
+                                classId
+                            });
                         }
-                        objectLabels.set(objectId, label);
+                    }
+                } else if (shape[1] === 8400 && shape[2] === 6) {
+                    // Shape: [1, 8400, 6] - transposed format
+                    for (let i = 0; i < 8400; i++) {
+                        const offset = i * 6;
+                        const cx = data[offset];
+                        const cy = data[offset + 1];
+                        const w = data[offset + 2];
+                        const h = data[offset + 3];
+                        const weedConf = data[offset + 4];
+                        const cropConf = data[offset + 5];
+
+                        const conf = Math.max(weedConf, cropConf);
+                        if (conf < 0.3) continue;
+
+                        const classId = weedConf > cropConf ? 0 : 1;
+                        const x = (cx - w / 2) * 640;
+                        const y = (cy - h / 2) * 640;
+                        const width = w * 640;
+                        const height = h * 640;
+
+                        if (width > 0 && height > 0) {
+                            rawDetections.push({
+                                bbox: [x, y, width, height],
+                                confidence: conf,
+                                classId
+                            });
+                        }
+                    }
+                }
+
+                // Clean up tensors
+                img.dispose();
+                resized.dispose();
+                normalized.dispose();
+                batched.dispose();
+                output.dispose();
+                if (prediction && prediction.dispose) prediction.dispose();
+
+                // Apply NMS if we have detections
+                if (rawDetections.length > 0) {
+                    const boxes = rawDetections.map(d => d.bbox);
+                    const scores = rawDetections.map(d => d.confidence);
+                    const indices = nonMaxSuppression(boxes, scores, 0.4);
+
+                    const detections = indices.map(idx => {
+                        const d = rawDetections[idx];
+                        const isWeed = d.classId === 0;
+                        const objectId = `${d.classId}_${Math.round(d.bbox[0])}_${Math.round(d.bbox[1])}`;
+
+                        let label;
+                        if (!seenObjects.has(objectId)) {
+                            seenObjects.add(objectId);
+                            if (isWeed) {
+                                weedId++;
+                                totalWeeds++;
+                                label = `WEED #${weedId}`;
+                            } else {
+                                cropId++;
+                                totalCrops++;
+                                label = `CROP #${cropId}`;
+                            }
+                            objectLabels.set(objectId, label);
+                        } else {
+                            label = objectLabels.get(objectId);
+                        }
+
+                        return {
+                            label,
+                            confidence: d.confidence,
+                            bbox: d.bbox,
+                            class: isWeed ? 'weed' : 'crop'
+                        };
+                    });
+
+                    // Update stats
+                    totalCount.textContent = totalWeeds + totalCrops;
+                    weedCount.textContent = totalWeeds;
+                    cropCount.textContent = totalCrops;
+
+                    if (detections.length > 0) {
+                        avgConf = detections.reduce((s, d) => s + d.confidence, 0) / detections.length;
+                        const confidencePercent = Math.min(100, avgConf * 100);
+                        confidenceFill.style.width = `${confidencePercent}%`;
+                        confidenceLabel.textContent = `Avg Confidence: ${confidencePercent.toFixed(1)}%`;
+                        statusDesc.textContent = `Detected ${detections.length} objects`;
                     } else {
-                        label = objectLabels.get(objectId);
+                        statusDesc.textContent = 'Scanning...';
                     }
 
-                    return {
-                        label,
-                        confidence: d.confidence,
-                        bbox: d.bbox,
-                        class: isWeed ? 'weed' : 'crop'
-                    };
-                });
+                    // Draw detections
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    
+                    detections.forEach(d => {
+                        const scaleX = canvas.width / 640;
+                        const scaleY = canvas.height / 640;
 
-                // Update stats
-                totalCount.textContent = totalWeeds + totalCrops;
-                weedCount.textContent = totalWeeds;
-                cropCount.textContent = totalCrops;
+                        const sx = d.bbox[0] * scaleX;
+                        const sy = d.bbox[1] * scaleY;
+                        const sw = d.bbox[2] * scaleX;
+                        const sh = d.bbox[3] * scaleY;
 
-                if (detections.length > 0) {
-                    avgConf = detections.reduce((s, d) => s + d.confidence, 0) / detections.length;
-                    confidenceFill.style.width = `${avgConf * 100}%`;
-                    confidenceLabel.textContent = `Avg Confidence: ${(avgConf * 100).toFixed(1)}%`;
-                    statusDesc.textContent = `Detected ${detections.length} objects`;
+                        // Draw bounding box
+                        ctx.lineWidth = 3;
+                        ctx.strokeStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
+                        ctx.strokeRect(sx, sy, sw, sh);
+
+                        // Draw label background
+                        const labelText = `${d.label} ${(d.confidence * 100).toFixed(0)}%`;
+                        ctx.font = 'bold 14px Inter';
+                        const textWidth = ctx.measureText(labelText).width;
+                        const labelWidth = textWidth + 20;
+                        
+                        ctx.fillStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
+                        ctx.fillRect(sx, sy - 30, labelWidth, 30);
+
+                        // Draw label text
+                        ctx.fillStyle = 'white';
+                        ctx.font = 'bold 14px Inter';
+                        ctx.fillText(labelText, sx + 10, sy - 10);
+                    });
                 } else {
                     statusDesc.textContent = 'No plants detected – try better lighting/closer';
                 }
 
-                // Draw
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-                detections.forEach(d => {
-                    const scaleX = canvas.width / 640;
-                    const scaleY = canvas.height / 640;
-
-                    const sx = d.bbox[0] * scaleX;
-                    const sy = d.bbox[1] * scaleY;
-                    const sw = d.bbox[2] * scaleX;
-                    const sh = d.bbox[3] * scaleY;
-
-                    ctx.lineWidth = 3;
-                    ctx.strokeStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
-                    ctx.strokeRect(sx, sy, sw, sh);
-
-                    const labelWidth = ctx.measureText(`${d.label} ${(d.confidence * 100).toFixed(0)}%`).width + 20;
-                    ctx.fillStyle = d.class === 'weed' ? '#ff4444' : '#44aa44';
-                    ctx.fillRect(sx, sy - 30, labelWidth, 30);
-
-                    ctx.fillStyle = 'white';
-                    ctx.font = 'bold 14px Inter';
-                    ctx.fillText(`${d.label} ${(d.confidence * 100).toFixed(0)}%`, sx + 10, sy - 10);
-                });
-            } else {
-                statusDesc.textContent = 'No detections – move closer/good light';
+            } catch (e) {
+                console.error('Detection error:', e);
+                statusDesc.textContent = 'Detection error - continuing';
             }
 
             tf.engine().endScope();
-            requestAnimationFrame(detectFrame);
+            animationId = requestAnimationFrame(detectFrame);
         }
 
-        // Draggable panel, buttons, startCamera() same as before...
+        // Button event listeners
+        pauseBtn.addEventListener('click', () => {
+            isDetecting = !isDetecting;
+            pauseBtn.textContent = isDetecting ? 'Pause Detection' : 'Resume Detection';
+            statusDesc.textContent = isDetecting ? 'Detection resumed' : 'Detection paused';
+            
+            if (isDetecting && !animationId) {
+                detectFrame();
+            }
+        });
 
+        resetBtn.addEventListener('click', () => {
+            totalWeeds = 0;
+            totalCrops = 0;
+            weedId = 0;
+            cropId = 0;
+            seenObjects.clear();
+            objectLabels.clear();
+            
+            weedCount.textContent = '0';
+            cropCount.textContent = '0';
+            totalCount.textContent = '0';
+            confidenceFill.style.width = '0%';
+            confidenceLabel.textContent = 'Avg Confidence: 0%';
+            statusDesc.textContent = 'Counts reset';
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
+
+        // Draggable panel functionality
+        let startY = 0;
+        let startHeight = 0;
+        const minHeight = 100;
+        const maxHeight = 400;
+
+        dragHandle.addEventListener('mousedown', startDrag);
+        dragHandle.addEventListener('touchstart', startDrag);
+
+        function startDrag(e) {
+            dragging = true;
+            startY = e.type === 'mousedown' ? e.clientY : e.touches[0].clientY;
+            startHeight = bottomWrapper.offsetHeight;
+            
+            document.addEventListener('mousemove', doDrag);
+            document.addEventListener('touchmove', doDrag);
+            document.addEventListener('mouseup', stopDrag);
+            document.addEventListener('touchend', stopDrag);
+            
+            e.preventDefault();
+        }
+
+        function doDrag(e) {
+            if (!dragging) return;
+            
+            const currentY = e.type === 'mousemove' ? e.clientY : e.touches[0].clientY;
+            const deltaY = startY - currentY;
+            let newHeight = startHeight + deltaY;
+            
+            // Constrain height
+            newHeight = Math.max(minHeight, Math.min(maxHeight, newHeight));
+            
+            bottomWrapper.style.height = `${newHeight}px`;
+            e.preventDefault();
+        }
+
+        function stopDrag() {
+            dragging = false;
+            document.removeEventListener('mousemove', doDrag);
+            document.removeEventListener('touchmove', doDrag);
+            document.removeEventListener('mouseup', stopDrag);
+            document.removeEventListener('touchend', stopDrag);
+        }
+
+        // Start the application
         startCamera();
     </script>
 </body>
 </html>
-
