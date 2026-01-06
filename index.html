@@ -19,8 +19,8 @@
         .status-desc { font-size: 12px; opacity: 0.7; margin-top: 2px; }
         .frame-count { background: rgba(255,255,255,0.08); padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 500; }
         .detection-area { flex: 1; position: relative; overflow: hidden; }
-        #video { width: 100%; height: 100%; object-fit: cover; background: #000; transform: scaleX(-1); } /* Mirror for front camera */
-        canvas { position: absolute; inset: 0; pointer-events: none; transform: scaleX(-1); } /* Mirror canvas too */
+        #video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+        canvas { position: absolute; inset: 0; pointer-events: none; }
         .bottom-panel-wrapper { position: absolute; bottom: 0; left: 0; right: 0; z-index: 50; transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1); }
         .bottom-panel { background: rgba(15,15,15,0.92); backdrop-filter: blur(20px); border-top-left-radius: 24px; border-top-right-radius: 24px; border-top: 1px solid rgba(255,255,255,0.08); box-shadow: 0 -8px 40px rgba(0,0,0,0.6); padding: 0 20px 20px; touch-action: pan-y; }
         .drag-handle { width: 40px; height: 4px; background: rgba(255,255,255,0.3); border-radius: 2px; margin: 12px auto; cursor: grab; }
@@ -121,86 +121,75 @@
         const seenObjects = new Set();
         const objectLabels = new Map();
 
-        // Enhanced camera constraints for better quality
+        // Enhanced camera constraints with better focus
         const constraints = {
             video: {
-                facingMode: { ideal: 'environment' }, // Use back camera
+                facingMode: { ideal: 'environment' },
                 width: { min: 1280, ideal: 1920, max: 2560 },
                 height: { min: 720, ideal: 1080, max: 1440 },
-                frameRate: { ideal: 60, min: 30 },
-                aspectRatio: { ideal: 16/9 },
-                resizeMode: 'crop-and-scale',
-                advanced: [
-                    { focusMode: 'continuous' }, // Auto focus
-                    { exposureMode: 'continuous' }, // Auto exposure
-                    { whiteBalanceMode: 'continuous' } // Auto white balance
-                ]
+                frameRate: { ideal: 30, min: 24 },
+                aspectRatio: { ideal: 16/9 }
             },
             audio: false
         };
 
         // Confidence and IOU thresholds
-        const CONFIDENCE_THRESHOLD = 0.7; // Increased from 0.3 to 0.7
-        const IOU_THRESHOLD = 0.6; // Increased from 0.4 to 0.6
+        const CONFIDENCE_THRESHOLD = 0.7;
+        const IOU_THRESHOLD = 0.6;
 
         function resizeCanvas() {
             if (video.videoWidth && video.videoHeight) {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
-                // Set canvas to fill container while maintaining aspect ratio
-                const videoAspect = video.videoWidth / video.videoHeight;
-                const containerAspect = canvas.clientWidth / canvas.clientHeight;
-                
-                if (videoAspect > containerAspect) {
-                    // Video is wider
-                    const scale = canvas.clientHeight / video.videoHeight;
-                    ctx.setTransform(-scale, 0, 0, scale, canvas.width, 0); // Mirror and scale
-                } else {
-                    // Video is taller
-                    const scale = canvas.clientWidth / video.videoWidth;
-                    ctx.setTransform(-scale, 0, 0, scale, canvas.width, 0); // Mirror and scale
-                }
             }
         }
 
         async function startCamera() {
             try {
-                console.log('Requesting camera with constraints:', JSON.stringify(constraints));
+                console.log('Requesting camera...');
                 
-                // Get all available cameras
+                // Try to get back camera
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
-                console.log('Available cameras:', videoDevices);
                 
-                // Try to find back camera
-                let backCameraConstraints = null;
+                let stream;
+                let backCameraFound = false;
+                
+                // Try to find and use back camera
                 for (const device of videoDevices) {
                     if (device.label.toLowerCase().includes('back') || 
                         device.label.toLowerCase().includes('rear')) {
                         console.log('Found back camera:', device.label);
-                        backCameraConstraints = {
-                            ...constraints,
+                        
+                        const backConstraints = {
                             video: {
-                                ...constraints.video,
-                                deviceId: { exact: device.deviceId }
+                                deviceId: { exact: device.deviceId },
+                                width: { ideal: 1920 },
+                                height: { ideal: 1080 },
+                                frameRate: { ideal: 30 }
                             }
                         };
-                        break;
+                        
+                        try {
+                            stream = await navigator.mediaDevices.getUserMedia(backConstraints);
+                            backCameraFound = true;
+                            break;
+                        } catch (e) {
+                            console.log('Back camera failed, trying next...');
+                        }
                     }
                 }
-
-                // Use back camera if found, else use default
-                const finalConstraints = backCameraConstraints || constraints;
                 
-                const stream = await navigator.mediaDevices.getUserMedia(finalConstraints);
+                // If back camera not found or failed, use default
+                if (!backCameraFound) {
+                    console.log('Using default camera');
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
+                }
+                
                 video.srcObject = stream;
                 
-                // Get video track to adjust settings
+                // Apply focus constraints if supported
                 const videoTrack = stream.getVideoTracks()[0];
-                console.log('Camera capabilities:', videoTrack.getCapabilities());
-                console.log('Camera settings:', videoTrack.getSettings());
-                
-                // Try to apply focus mode if supported
                 if (videoTrack.getCapabilities().focusMode) {
                     try {
                         await videoTrack.applyConstraints({
@@ -208,19 +197,56 @@
                         });
                         console.log('Continuous focus enabled');
                     } catch (e) {
-                        console.log('Could not set continuous focus:', e);
+                        console.log('Focus constraint not fully supported:', e);
                     }
+                }
+                
+                // Try to optimize video quality
+                try {
+                    await videoTrack.applyConstraints({
+                        advanced: [
+                            { focusMode: 'continuous' },
+                            { exposureMode: 'continuous' },
+                            { whiteBalanceMode: 'continuous' }
+                        ]
+                    });
+                } catch (e) {
+                    console.log('Some constraints not supported');
                 }
 
                 video.onloadedmetadata = () => {
                     console.log('Video dimensions:', video.videoWidth, 'x', video.videoHeight);
                     video.play();
                     resizeCanvas();
+                    
+                    // Add tap-to-focus functionality
+                    canvas.addEventListener('click', (e) => {
+                        const rect = canvas.getBoundingClientRect();
+                        const x = (e.clientX - rect.left) / rect.width;
+                        const y = (e.clientY - rect.top) / rect.height;
+                        
+                        if (videoTrack.getCapabilities && videoTrack.getCapabilities().focusDistance) {
+                            try {
+                                videoTrack.applyConstraints({
+                                    advanced: [{ focusMode: 'manual', focusDistance: 0.5 }]
+                                }).then(() => {
+                                    console.log('Manual focus applied');
+                                    setTimeout(() => {
+                                        videoTrack.applyConstraints({
+                                            advanced: [{ focusMode: 'continuous' }]
+                                        });
+                                    }, 3000);
+                                });
+                            } catch (e) {
+                                console.log('Tap to focus failed');
+                            }
+                        }
+                    });
+                    
                     statusDesc.textContent = 'High-quality camera ready';
                     loadModel();
                 };
                 
-                video.onresize = resizeCanvas;
                 window.addEventListener('resize', resizeCanvas);
                 
             } catch (e) {
@@ -231,9 +257,9 @@
                 try {
                     const basicConstraints = {
                         video: {
+                            facingMode: 'environment',
                             width: { ideal: 1280 },
-                            height: { ideal: 720 },
-                            facingMode: 'environment'
+                            height: { ideal: 720 }
                         },
                         audio: false
                     };
@@ -253,7 +279,7 @@
             try {
                 // Try different model paths
                 const modelPaths = [
-                    'best_model_web/model.json',
+                    'best_web_model/model.json',
                     'model.json',
                     './model.json',
                     'best/model.json'
@@ -331,7 +357,7 @@
             tf.engine().startScope();
 
             try {
-                // Capture frame with high quality
+                // Capture frame
                 const img = tf.browser.fromPixels(video);
                 const resized = tf.image.resizeBilinear(img, [640, 640]);
                 const normalized = resized.div(255.0);
@@ -354,6 +380,7 @@
                 const data = await output.data();
                 
                 const rawDetections = [];
+                console.log(`Model output shape: ${shape}`); // Debug log
                 
                 if (shape[1] === 6 && shape[2] === 8400) {
                     // Shape: [1, 6, 8400] - standard YOLO format
@@ -366,7 +393,7 @@
                         const cropConf = data[42000 + i];
 
                         const conf = Math.max(weedConf, cropConf);
-                        if (conf < CONFIDENCE_THRESHOLD) continue; // Use higher threshold
+                        if (conf < CONFIDENCE_THRESHOLD) continue;
 
                         const classId = weedConf > cropConf ? 0 : 1;
                         const x = (cx - w / 2) * 640;
@@ -374,7 +401,7 @@
                         const width = w * 640;
                         const height = h * 640;
 
-                        if (width > 10 && height > 10) { // Minimum size filter
+                        if (width > 10 && height > 10) {
                             rawDetections.push({
                                 bbox: [x, y, width, height],
                                 confidence: conf,
@@ -394,7 +421,7 @@
                         const cropConf = data[offset + 5];
 
                         const conf = Math.max(weedConf, cropConf);
-                        if (conf < CONFIDENCE_THRESHOLD) continue; // Use higher threshold
+                        if (conf < CONFIDENCE_THRESHOLD) continue;
 
                         const classId = weedConf > cropConf ? 0 : 1;
                         const x = (cx - w / 2) * 640;
@@ -402,7 +429,7 @@
                         const width = w * 640;
                         const height = h * 640;
 
-                        if (width > 10 && height > 10) { // Minimum size filter
+                        if (width > 10 && height > 10) {
                             rawDetections.push({
                                 bbox: [x, y, width, height],
                                 confidence: conf,
@@ -410,7 +437,14 @@
                             });
                         }
                     }
+                } else {
+                    console.warn(`Unexpected model output shape: ${shape}. Trying generic processing...`);
+                    // Generic processing for unknown shape
+                    const totalElements = shape.reduce((a, b) => a * b, 1);
+                    console.log(`Total elements in output: ${totalElements}`);
                 }
+
+                console.log(`Raw detections before NMS: ${rawDetections.length}`); // Debug log
 
                 // Clean up tensors to prevent memory leaks
                 img.dispose();
@@ -420,7 +454,7 @@
                 output.dispose();
                 if (prediction && prediction.dispose) prediction.dispose();
 
-                // Apply NMS with higher IOU threshold
+                // Apply NMS
                 if (rawDetections.length > 0) {
                     const boxes = rawDetections.map(d => d.bbox);
                     const scores = rawDetections.map(d => d.confidence);
@@ -456,6 +490,8 @@
                         };
                     });
 
+                    console.log(`Detections after NMS: ${detections.length}`); // Debug log
+
                     // Update stats
                     totalCount.textContent = totalWeeds + totalCrops;
                     weedCount.textContent = totalWeeds;
@@ -471,18 +507,23 @@
                         statusDesc.textContent = 'Scanning for plants (70%+ confidence required)';
                     }
 
-                    // Draw detections with better visualization
-                    ctx.save();
+                    // Draw detections with proper scaling
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     
                     detections.forEach(d => {
-                        const scaleX = video.videoWidth / 640;
-                        const scaleY = video.videoHeight / 640;
-
+                        // Calculate scale factors
+                        const modelWidth = 640;
+                        const modelHeight = 640;
+                        const scaleX = video.videoWidth / modelWidth;
+                        const scaleY = video.videoHeight / modelHeight;
+                        
+                        // Scale coordinates from model space to video space
                         const sx = d.bbox[0] * scaleX;
                         const sy = d.bbox[1] * scaleY;
                         const sw = d.bbox[2] * scaleX;
                         const sh = d.bbox[3] * scaleY;
+                        
+                        console.log(`Drawing box: ${sx}, ${sy}, ${sw}, ${sh}`); // Debug log
 
                         // Draw bounding box with glow effect
                         ctx.lineWidth = 3;
@@ -492,7 +533,7 @@
                         ctx.strokeRect(sx, sy, sw, sh);
                         ctx.shadowBlur = 0;
 
-                        // Draw label background with rounded corners
+                        // Draw label background
                         const labelText = `${d.label} ${(d.confidence * 100).toFixed(0)}%`;
                         ctx.font = 'bold 14px Inter';
                         const textWidth = ctx.measureText(labelText).width;
@@ -522,8 +563,6 @@
                         ctx.font = 'bold 14px Inter';
                         ctx.fillText(labelText, labelX + 10, labelY + 20);
                     });
-                    
-                    ctx.restore();
                 } else {
                     statusDesc.textContent = 'No high-confidence detections – move closer/improve lighting';
                 }
@@ -538,7 +577,7 @@
             // Adjust frame rate for performance
             setTimeout(() => {
                 animationId = requestAnimationFrame(detectFrame);
-            }, isDetecting ? 50 : 100); // ~20 FPS when detecting
+            }, isDetecting ? 50 : 100);
         }
 
         // Button event listeners
