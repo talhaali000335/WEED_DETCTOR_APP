@@ -240,18 +240,20 @@
                 if (shape[1] === 6 && shape[2] === 8400) {
                     // Shape: [1, 6, 8400] - channels first
                     for (let i = 0; i < 8400; i++) {
-                        const x1 = data[i];
-                        const y1 = data[8400 + i];
-                        const x2 = data[16800 + i];
-                        const y2 = data[25200 + i];
+                        const cx = data[i];
+                        const cy = data[8400 + i];
+                        const w = data[16800 + i];
+                        const h = data[25200 + i];
                         const weedConf = data[33600 + i];
                         const cropConf = data[42000 + i];
                         const conf = Math.max(weedConf, cropConf);
                         if (conf < CONFIDENCE_THRESHOLD) continue;
                         const classId = weedConf > cropConf ? 0 : 1;
-                        const width = x2 - x1;
-                        const height = y2 - y1;
-                        if (width > 0 && height > 0) {
+                        const x1 = cx - w / 2;
+                        const y1 = cy - h / 2;
+                        const width = w;
+                        const height = h;
+                        if (width > 0 && height > 0 && x1 >= 0 && y1 >= 0 && x1 + width <= 640 && y1 + height <= 640) {
                             rawDetections.push({
                                 bbox: [x1, y1, width, height],
                                 confidence: conf,
@@ -263,18 +265,20 @@
                     // Shape: [1, 8400, 6] - detections first
                     for (let i = 0; i < 8400; i++) {
                         const offset = i * 6;
-                        const x1 = data[offset];
-                        const y1 = data[offset + 1];
-                        const x2 = data[offset + 2];
-                        const y2 = data[offset + 3];
+                        const cx = data[offset];
+                        const cy = data[offset + 1];
+                        const w = data[offset + 2];
+                        const h = data[offset + 3];
                         const weedConf = data[offset + 4];
                         const cropConf = data[offset + 5];
                         const conf = Math.max(weedConf, cropConf);
                         if (conf < CONFIDENCE_THRESHOLD) continue;
                         const classId = weedConf > cropConf ? 0 : 1;
-                        const width = x2 - x1;
-                        const height = y2 - y1;
-                        if (width > 0 && height > 0) {
+                        const x1 = cx - w / 2;
+                        const y1 = cy - h / 2;
+                        const width = w;
+                        const height = h;
+                        if (width > 0 && height > 0 && x1 >= 0 && y1 >= 0 && x1 + width <= 640 && y1 + height <= 640) {
                             rawDetections.push({
                                 bbox: [x1, y1, width, height],
                                 confidence: conf,
@@ -290,6 +294,8 @@
                 output.dispose();
                 if (prediction && prediction.dispose) prediction.dispose();
                 if (rawDetections.length > 0) {
+                    // Sort raw detections by confidence descending before NMS
+                    rawDetections.sort((a, b) => b.confidence - a.confidence);
                     const boxes = rawDetections.map(d => d.bbox);
                     const scores = rawDetections.map(d => d.confidence);
                     const indices = nonMaxSuppression(boxes, scores, IOU_THRESHOLD);
