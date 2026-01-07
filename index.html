@@ -159,7 +159,7 @@
 
         async function loadModel() {
             try {
-                model = await tf.loadGraphModel('best_web_model/model.json');
+                model = await tf.loadGraphModel('best_model_web/model.json');
                 statusDesc.textContent = 'Model loaded – detecting! Point at plants';
                 console.log('Model loaded successfully');
                 detectFrame();
@@ -170,7 +170,7 @@
         }
 
         // Simple NMS
-        function nonMaxSuppression(boxes, scores, iouThreshold = 0.4) {
+        function nonMaxSuppression(boxes, scores, iouThreshold = 0.6) {
             const indices = [];
             const sorted = scores.map((s, i) => ({score: s, index: i})).sort((a, b) => b.score - a.score);
 
@@ -257,7 +257,7 @@
                 const conf = Math.max(weedConf, cropConf);
                 const classId = weedConf > cropConf ? 0 : 1; // 0=weed, 1=crop
 
-                if (conf < 0.3) continue; // Lower threshold
+                if (conf < 0.7) continue; // Lower threshold
 
                 const x = (cx - w / 2) * 640;
                 const y = (cy - h / 2) * 640;
@@ -359,3 +359,4 @@
     </script>
 </body>
 </html>
+
