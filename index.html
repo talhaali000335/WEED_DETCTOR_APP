@@ -135,7 +135,7 @@
         async function loadModel() {
             try {
                 statusText.textContent = "Loading model... Please wait";
-                model = await tf.loadGraphModel('best_web_model/model.json');
+                model = await tf.loadGraphModel('best_model_web/model.json');
                 console.log("Model loaded successfully");
 
                 // Hide loading screen after successful load
@@ -347,3 +347,4 @@
     </script>
 </body>
 </html>
+
