@@ -3,20 +3,24 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>YOLO Test - Upload Image</title>
+    <title>YOLO Detection - Upload & Test Image</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
-            background: #111;
-            color: white;
+            background: #0d1117;
+            color: #e6edf3;
             margin: 0;
             padding: 20px;
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
             align-items: center;
         }
-        h1 { color: #4CAF50; }
+        h1 {
+            color: #58a6ff;
+            margin-bottom: 20px;
+        }
         #upload-area {
             margin: 20px 0;
             text-align: center;
@@ -27,9 +31,10 @@
             margin: 20px auto;
             display: inline-block;
             background: #000;
-            border: 2px solid #333;
-            border-radius: 8px;
+            border: 2px solid #30363d;
+            border-radius: 12px;
             overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
         }
         #uploaded-image {
             max-width: 100%;
@@ -41,16 +46,23 @@
             top: 0; left: 0;
             width: 100%; height: 100%;
         }
-        #result {
+        #status {
+            margin: 15px 0;
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #58a6ff;
+        }
+        #result-info {
             margin-top: 20px;
             padding: 15px;
-            background: #222;
+            background: #161b22;
             border-radius: 8px;
+            border: 1px solid #30363d;
             max-width: 600px;
             width: 100%;
         }
         button {
-            background: #4CAF50;
+            background: #238636;
             color: white;
             border: none;
             padding: 12px 24px;
@@ -58,24 +70,18 @@
             border-radius: 6px;
             cursor: pointer;
             margin: 10px;
+            transition: background 0.2s;
         }
-        button:hover { background: #45a049; }
-        #status { color: #4CAF50; font-weight: bold; }
-        .box {
-            position: absolute;
-            border: 3px solid;
-            box-sizing: border-box;
-            pointer-events: none;
-        }
-        .label {
+        button:hover { background: #2ea043; }
+        input[type="file"] { display: none; }
+        .label-box {
             position: absolute;
             background: rgba(0,0,0,0.7);
             color: white;
             padding: 4px 8px;
             font-size: 13px;
             border-radius: 4px;
-            top: -24px;
-            left: 0;
+            pointer-events: none;
         }
     </style>
 </head>
@@ -83,9 +89,9 @@
     <h1>YOLO Model Test - Upload Image</h1>
 
     <div id="upload-area">
-        <input type="file" id="file-input" accept="image/*" style="display:none;">
+        <input type="file" id="file-input" accept="image/*">
         <button onclick="document.getElementById('file-input').click()">Upload Image</button>
-        <p id="status">Waiting for image...</p>
+        <p id="status">Waiting for image... (model loading in background)</p>
     </div>
 
     <div id="image-container">
@@ -93,7 +99,12 @@
         <canvas id="canvas"></canvas>
     </div>
 
-    <div id="result"></div>
+    <div id="result-info">
+        <strong>Detected objects:</strong> <span id="detected-count">0</span><br>
+        <strong>Weeds:</strong> <span id="weed-count">0</span> | 
+        <strong>Crops:</strong> <span id="crop-count">0</span><br>
+        <strong>Avg Confidence:</strong> <span id="avg-conf">0%</span>
+    </div>
 
     <script>
         const fileInput = document.getElementById('file-input');
@@ -101,27 +112,31 @@
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
         const status = document.getElementById('status');
-        const resultDiv = document.getElementById('result');
+        const detectedCount = document.getElementById('detected-count');
+        const weedCountEl = document.getElementById('weed-count');
+        const cropCountEl = document.getElementById('crop-count');
+        const avgConfEl = document.getElementById('avg-conf');
 
         let model;
+        let totalWeeds = 0;
+        let totalCrops = 0;
 
-        // Load model when page loads
+        // Load model on page load
         async function loadModel() {
             try {
-                status.textContent = "Loading model...";
+                status.textContent = "Loading YOLO model...";
                 model = await tf.loadGraphModel('best_model_web/model.json');
-                status.textContent = "Model loaded successfully! Upload an image.";
-                console.log("Model loaded");
+                status.textContent = "Model loaded successfully! Now upload an image.";
+                console.log("Model loaded OK");
             } catch (err) {
                 status.textContent = "Model loading failed!";
-                resultDiv.innerHTML = `<p style="color:red;">Error: ${err.message}</p>`;
-                console.error(err);
+                console.error("Model load error:", err);
             }
         }
 
         loadModel();
 
-        // When user selects image
+        // When image is selected
         fileInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
@@ -129,26 +144,24 @@
             status.textContent = "Processing image...";
 
             const reader = new FileReader();
-            reader.onload = async (event) => {
+            reader.onload = (event) => {
                 imgElement.src = event.target.result;
                 imgElement.onload = async () => {
-                    // Set canvas size to match image
                     canvas.width = imgElement.naturalWidth;
                     canvas.height = imgElement.naturalHeight;
                     ctx.drawImage(imgElement, 0, 0);
 
-                    if (!model) {
+                    if (model) {
+                        await detectObjects();
+                    } else {
                         status.textContent = "Model not loaded yet.";
-                        return;
                     }
-
-                    await runDetection();
                 };
             };
             reader.readAsDataURL(file);
         });
 
-        async function runDetection() {
+        async function detectObjects() {
             status.textContent = "Running detection...";
 
             tf.engine().startScope();
@@ -162,7 +175,7 @@
             try {
                 prediction = await model.executeAsync(batched);
             } catch (err) {
-                console.error("Prediction error:", err);
+                console.error("Detection error:", err);
                 status.textContent = "Detection failed";
                 tf.engine().endScope();
                 return;
@@ -170,7 +183,7 @@
 
             let output = Array.isArray(prediction) ? prediction[0] : prediction;
 
-            // Transpose if shape is [1, 6, 8400]
+            // Fix shape: [1, 6, 8400] → [1, 8400, 6]
             if (output.shape[1] === 6 && output.shape[2] === 8400) {
                 output = output.transpose([0, 2, 1]);
             }
@@ -178,9 +191,10 @@
             const data = await output.data();
             const numBoxes = output.shape[1];
 
-            ctx.drawImage(imgElement, 0, 0); // Redraw original image
+            ctx.drawImage(imgElement, 0, 0); // redraw original
 
             let detected = 0;
+            let sumConf = 0;
 
             for (let i = 0; i < numBoxes; i++) {
                 const offset = i * 6;
@@ -192,15 +206,16 @@
                 const cropConf = data[offset + 5];
 
                 const conf = Math.max(weedConf, cropConf);
-                if (conf < 0.35) continue; // adjustable threshold
+                if (conf < 0.35) continue;
 
-                const x = (cx - w / 2) * imgElement.naturalWidth * (640 / imgElement.naturalWidth);
-                const y = (cy - h / 2) * imgElement.naturalHeight * (640 / imgElement.naturalHeight);
-                const width = w * imgElement.naturalWidth * (640 / imgElement.naturalWidth);
-                const height = h * imgElement.naturalHeight * (640 / imgElement.naturalHeight);
+                // Convert center-size to corner-size
+                const x = (cx - w / 2) * imgElement.naturalWidth;
+                const y = (cy - h / 2) * imgElement.naturalHeight;
+                const width = w * imgElement.naturalWidth;
+                const height = h * imgElement.naturalHeight;
 
                 const classId = weedConf > cropConf ? 0 : 1;
-                const className = classId === 0 ? 'WEED' : 'CROP';
+                const label = classId === 0 ? `WEED #${++totalWeeds}` : `CROP #${++totalCrops}`;
                 const color = classId === 0 ? '#ff4444' : '#44ff44';
 
                 // Draw box
@@ -208,20 +223,29 @@
                 ctx.lineWidth = 3;
                 ctx.strokeRect(x, y, width, height);
 
-                // Label
-                const label = `${className} ${(conf * 100).toFixed(0)}%`;
+                // Label background
+                const text = `${label} ${(conf * 100).toFixed(0)}%`;
+                const textWidth = ctx.measureText(text).width + 16;
                 ctx.fillStyle = color;
-                ctx.fillRect(x, y - 24, ctx.measureText(label).width + 16, 24);
+                ctx.fillRect(x, y - 24, textWidth, 24);
+
+                // Text
                 ctx.fillStyle = 'white';
                 ctx.font = 'bold 14px Arial';
-                ctx.fillText(label, x + 8, y - 8);
+                ctx.fillText(text, x + 8, y - 8);
 
                 detected++;
+                sumConf += conf;
             }
 
+            detectedCount.textContent = detected;
+            weedCountEl.textContent = totalWeeds;
+            cropCountEl.textContent = totalCrops;
+            avgConfEl.textContent = detected > 0 ? ((sumConf / detected) * 100).toFixed(1) + '%' : '0%';
+
             status.textContent = detected > 0 
-                ? `Found ${detected} object(s)` 
-                : "No objects detected (try lower threshold or better image)";
+                ? `Detection complete — found ${detected} objects`
+                : "No objects detected (try clearer image or lower threshold)";
 
             tf.engine().endScope();
         }
